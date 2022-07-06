@@ -428,7 +428,7 @@ impl Scheduler {
 
         ar = CreateActionRow::default();
 
-        if resp_type == ResponseType::Blackout {
+        if resp_type != ResponseType::Blackout {
             let mut button = CreateButton::default();
             button.label("Select all");
             button.custom_id("select_all");
