@@ -32,6 +32,7 @@ const MAX_WEEKS: usize = 10;
 struct Handler {
     refresh: bool,
     schedulers: Map<MessageId, Scheduler>,
+    startup_done: tokio::sync::OnceCell<()>,
 }
 
 async fn send_error(ctx: &Context, command: &ApplicationCommandInteraction, msg: &str) {
@@ -104,6 +105,7 @@ impl Handler {
         Handler {
             refresh,
             schedulers,
+            ..Default::default()
         }
     }
 
@@ -196,45 +198,9 @@ impl Handler {
             .expect("Cannot find scheduler");
         scheduler.val().show_details(&ctx, component).await;
     }
-}
 
-#[async_trait]
-impl EventHandler for Handler {
-    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        match interaction {
-            Interaction::ApplicationCommand(command) => {
-                let user = command.user.name.as_str();
-                let command_name = command.data.name.as_str();
-                info!("{} <{}>", command_name, user);
-                match command_name {
-                    "schedule" => self.create_scheduler(ctx, command).await,
-                    _ => panic!("Unexpected command: {}", command_name),
-                }
-            }
-            Interaction::MessageComponent(component) => {
-                let user = component.user.name.as_str();
-                let button_id = component.data.custom_id.as_str();
-                info!("{} <{}>", button_id, user);
-                match button_id {
-                    "response" => {
-                        self.handle_get_response(ctx, &component, ResponseType::Normal)
-                            .await
-                    }
-                    "blackout" => {
-                        self.handle_get_response(ctx, &component, ResponseType::Blackout)
-                            .await
-                    }
-                    "details" => self.handle_show_details(ctx, &component).await,
-                    _ => (),
-                }
-            }
-            _ => panic!("Unexpected interaction: {:?}", interaction),
-        }
-    }
-
-    async fn ready(&self, ctx: Context, _ready: Ready) {
-        info!("ready");
-
+    async fn do_initialization(&self, ctx: &Context) {
+        info!("registering");
         ApplicationCommand::create_global_application_command(&ctx, |command| {
             command
                 .name("schedule")
@@ -278,9 +244,51 @@ impl EventHandler for Handler {
         if self.refresh {
             for entry in self.schedulers.iter() {
                 let scheduler = entry.val();
-                scheduler.update_message(&ctx).await;
+                scheduler.update_message(ctx).await;
             }
         }
+    }
+}
+
+#[async_trait]
+impl EventHandler for Handler {
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        match interaction {
+            Interaction::ApplicationCommand(command) => {
+                let user = command.user.name.as_str();
+                let command_name = command.data.name.as_str();
+                info!("{} <{}>", command_name, user);
+                match command_name {
+                    "schedule" => self.create_scheduler(ctx, command).await,
+                    _ => panic!("Unexpected command: {}", command_name),
+                }
+            }
+            Interaction::MessageComponent(component) => {
+                let user = component.user.name.as_str();
+                let button_id = component.data.custom_id.as_str();
+                info!("{} <{}>", button_id, user);
+                match button_id {
+                    "response" => {
+                        self.handle_get_response(ctx, &component, ResponseType::Normal)
+                            .await
+                    }
+                    "blackout" => {
+                        self.handle_get_response(ctx, &component, ResponseType::Blackout)
+                            .await
+                    }
+                    "details" => self.handle_show_details(ctx, &component).await,
+                    _ => (),
+                }
+            }
+            _ => panic!("Unexpected interaction: {:?}", interaction),
+        }
+    }
+
+    async fn ready(&self, ctx: Context, _ready: Ready) {
+        info!("ready");
+        self.startup_done
+            .get_or_init(|| self.do_initialization(&ctx))
+            .await;
     }
 
     async fn message_delete(
