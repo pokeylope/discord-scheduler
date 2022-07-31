@@ -12,8 +12,8 @@ A Discord bot for scheduling group events.
 
 This bot was designed for personal use rather than trying to be a universal solution, and may or may not be useful for others.
 
-* Can specify Saturdays, Sundays, or both as options when creating a scheduler; other weekdays are not supported
-* Date range is at most ten weeks due to Discord UI limitations
+* Can specify Saturdays + Sundays or any individual weekday when creating a scheduler; other combinations are not supported
+* Number of date options is at most 25 due to Discord UI limitations
 
 ## Usage
 

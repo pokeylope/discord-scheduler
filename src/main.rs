@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 const DATA_DIR: &str = "data";
-const MAX_WEEKS: usize = 10;
+const MAX_DATES: usize = 25; // limit for select menu
 
 #[derive(Default)]
 struct Handler {
@@ -128,9 +128,9 @@ impl Handler {
             RoleId::from_str(v.as_str().expect("Group has incorrect type"))
                 .expect("Error parsing role")
         });
-        let weeks = match options.get("weeks") {
-            Some(weeks) => weeks.as_i64().expect("Weeks has incorrect type"),
-            None => MAX_WEEKS as i64,
+        let limit = match options.get("limit") {
+            Some(limit) => limit.as_i64().expect("Limit has incorrect type"),
+            None => MAX_DATES as i64,
         };
         let days = options
             .get("days")
@@ -158,7 +158,7 @@ impl Handler {
             .await
             .expect("Cannot get message");
         let message_id = message.id;
-        let scheduler = Scheduler::new(command.user.id, group, message, weeks, skip, title, days);
+        let scheduler = Scheduler::new(command.user.id, group, message, limit, skip, title, days);
         scheduler.update_message(&ctx).await;
         write_file(&message_id, &scheduler);
         self.schedulers.insert(message_id, scheduler);
@@ -217,11 +217,11 @@ impl Handler {
                         .kind(ApplicationCommandOptionType::Role)
                 })
                 .create_option(|o| {
-                    o.name("weeks")
-                        .description("number of weeks")
+                    o.name("limit")
+                        .description("number of dates to include")
                         .kind(ApplicationCommandOptionType::Integer)
                         .min_int_value(1)
-                        .max_int_value(MAX_WEEKS)
+                        .max_int_value(MAX_DATES)
                 })
                 .create_option(|o| {
                     o.name("skip")
@@ -234,8 +234,13 @@ impl Handler {
                         .description("weekdays to include")
                         .kind(ApplicationCommandOptionType::String)
                         .add_string_choice("Saturday + Sunday", "Sat+Sun")
-                        .add_string_choice("Saturday", "Sat")
                         .add_string_choice("Sunday", "Sun")
+                        .add_string_choice("Monday", "Mon")
+                        .add_string_choice("Tuesday", "Tue")
+                        .add_string_choice("Wednesday", "Wed")
+                        .add_string_choice("Thursday", "Thu")
+                        .add_string_choice("Friday", "Fri")
+                        .add_string_choice("Saturday", "Sat")
                 })
         })
         .await

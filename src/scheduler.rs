@@ -54,22 +54,21 @@ impl Scheduler {
         owner: UserId,
         group: Option<RoleId>,
         message: Message,
-        weeks: i64,
+        limit: i64,
         skip: Option<i64>,
         title: &str,
         days: HashSet<Weekday>,
     ) -> Self {
+        let limit = limit - (limit % days.len() as i64);
         let today = Local::today().naive_local();
         let mut start_date = today.succ();
-        while start_date.weekday() != Weekday::Sat {
-            start_date = start_date.succ();
-        }
         if let Some(skip) = skip {
             start_date += Duration::weeks(skip);
         }
-        let end_date = start_date + Duration::weeks(weeks);
-        let window = DateRule::daily(start_date).with_end(end_date);
-        let dates = window.filter(|day| days.contains(&day.weekday())).collect();
+        let dates = DateRule::daily(start_date)
+            .filter(|day| days.contains(&day.weekday()))
+            .take(limit as usize)
+            .collect();
         Self {
             owner,
             title: title.to_string(),
