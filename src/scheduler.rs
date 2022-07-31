@@ -326,14 +326,13 @@ impl Scheduler {
             let interaction_id = interaction.data.custom_id.as_str();
             match interaction_id {
                 "submit" => {
-                    if matches!(
-                        component
-                            .edit_original_interaction_response(ctx, |m| {
-                                m.content("Response submitted").components(|c| c)
-                            })
-                            .await,
-                        Err(_)
-                    ) {
+                    if component
+                        .edit_original_interaction_response(ctx, |m| {
+                            m.content("Response submitted").components(|c| c)
+                        })
+                        .await
+                        .is_err()
+                    {
                         error!("Cannot update message");
                     }
                     break;
