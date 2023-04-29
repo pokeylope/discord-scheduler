@@ -10,13 +10,15 @@ use log::{error, info};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
 use serenity::json::Value;
+use serenity::model::application::command::{Command, CommandOptionType};
+use serenity::model::application::interaction::{
+    application_command::ApplicationCommandInteraction,
+    message_component::MessageComponentInteraction,
+    Interaction,
+    InteractionResponseType
+};
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, MessageId, RoleId};
-use serenity::model::interactions::application_command::{
-    ApplicationCommand, ApplicationCommandInteraction, ApplicationCommandOptionType,
-};
-use serenity::model::interactions::message_component::MessageComponentInteraction;
-use serenity::model::interactions::{Interaction, InteractionResponseType};
 use serenity::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -201,38 +203,38 @@ impl Handler {
 
     async fn do_initialization(&self, ctx: &Context) {
         info!("registering");
-        ApplicationCommand::create_global_application_command(&ctx, |command| {
+        Command::create_global_application_command(&ctx, |command| {
             command
                 .name("schedule")
                 .description("Create a scheduler")
                 .create_option(|o| {
                     o.name("description")
                         .description("event description")
-                        .kind(ApplicationCommandOptionType::String)
+                        .kind(CommandOptionType::String)
                         .required(true)
                 })
                 .create_option(|o| {
                     o.name("group")
                         .description("player group")
-                        .kind(ApplicationCommandOptionType::Role)
+                        .kind(CommandOptionType::Role)
                 })
                 .create_option(|o| {
                     o.name("limit")
                         .description("number of dates to include")
-                        .kind(ApplicationCommandOptionType::Integer)
+                        .kind(CommandOptionType::Integer)
                         .min_int_value(1)
                         .max_int_value(MAX_DATES)
                 })
                 .create_option(|o| {
                     o.name("skip")
                         .description("weeks before start")
-                        .kind(ApplicationCommandOptionType::Integer)
+                        .kind(CommandOptionType::Integer)
                         .min_int_value(0)
                 })
                 .create_option(|o| {
                     o.name("days")
                         .description("weekdays to include")
-                        .kind(ApplicationCommandOptionType::String)
+                        .kind(CommandOptionType::String)
                         .add_string_choice("Saturday + Sunday", "Sat+Sun")
                         .add_string_choice("Sunday", "Sun")
                         .add_string_choice("Monday", "Mon")

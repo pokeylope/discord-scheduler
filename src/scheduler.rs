@@ -7,10 +7,11 @@ use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serenity::builder::{CreateActionRow, CreateButton, CreateComponents, CreateSelectMenu};
 use serenity::client::Context;
+use serenity::model::application::component::ButtonStyle;
+use serenity::model::application::interaction::message_component::MessageComponentInteraction;
+use serenity::model::application::interaction::InteractionResponseType;
 use serenity::model::channel::Message;
 use serenity::model::id::{RoleId, UserId};
-use serenity::model::interactions::message_component::{ButtonStyle, MessageComponentInteraction};
-use serenity::model::interactions::InteractionResponseType;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::Instant;
@@ -60,8 +61,8 @@ impl Scheduler {
         days: HashSet<Weekday>,
     ) -> Self {
         let limit = limit - (limit % days.len() as i64);
-        let today = Local::today().naive_local();
-        let mut start_date = today.succ();
+        let today = Local::now().date_naive();
+        let mut start_date = today.succ_opt().unwrap();
         if let Some(skip) = skip {
             start_date += Duration::weeks(skip);
         }
