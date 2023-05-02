@@ -103,6 +103,12 @@ impl Scheduler {
         self.update_messages(ctx).await;
     }
 
+    pub async fn delete_response(&self, ctx: &Context, user: UserId) {
+        self.responses.write().unwrap().remove(&user);
+        self.save();
+        self.update_messages(ctx).await;
+    }
+
     pub async fn set_blackout(&self, ctx: &Context, response: Response) {
         *self.blackout_dates.write().unwrap() = response.dates;
         self.save();
@@ -293,22 +299,24 @@ impl Scheduler {
             }
         };
 
-        let mut response = match resp_type {
+        let (mut response, allow_delete) = match resp_type {
             ResponseType::Normal => self
                 .responses
                 .read()
                 .unwrap()
                 .get(&user.id)
                 .cloned()
-                .unwrap_or_default(),
-            ResponseType::Blackout => self.blackout_dates.read().unwrap().clone().into(),
+                .map(|r| (r, true))
+                .unwrap_or((Response::default(), false)),
+            ResponseType::Blackout => (self.blackout_dates.read().unwrap().clone().into(), false),
         };
         component
             .create_interaction_response(ctx, |r| {
                 r.kind(InteractionResponseType::ChannelMessageWithSource)
                     .interaction_response_data(|m| {
-                        m.ephemeral(true)
-                            .components(|c| self.create_dm_buttons(&response, c, resp_type))
+                        m.ephemeral(true).components(|c| {
+                            self.create_dm_buttons(&response, c, resp_type, allow_delete)
+                        })
                     })
             })
             .await
@@ -380,11 +388,24 @@ impl Scheduler {
                         resp_dates.insert(*date);
                     }
                 }
+                "delete" => {
+                    self.delete_response(ctx, user.id).await;
+                    if component
+                        .edit_original_interaction_response(ctx, |m| {
+                            m.content("Response deleted").components(|c| c)
+                        })
+                        .await
+                        .is_err()
+                    {
+                        error!("Cannot update message");
+                    }
+                    return;
+                }
                 _ => panic!("Unexpected button: {interaction_id}"),
             }
             component
                 .edit_original_interaction_response(ctx, |m| {
-                    m.components(|c| self.create_dm_buttons(&response, c, resp_type))
+                    m.components(|c| self.create_dm_buttons(&response, c, resp_type, allow_delete))
                 })
                 .await
                 .expect("Cannot update message");
@@ -401,6 +422,7 @@ impl Scheduler {
         response: &Response,
         components: &'a mut CreateComponents,
         resp_type: ResponseType,
+        allow_delete: bool,
     ) -> &'a mut CreateComponents {
         let mut ar = CreateActionRow::default();
         let mut menu = CreateSelectMenu::default();
@@ -449,7 +471,19 @@ impl Scheduler {
         button.custom_id("submit");
         ar.add_button(button);
 
-        components.add_action_row(ar)
+        components.add_action_row(ar);
+
+        if allow_delete {
+            ar = CreateActionRow::default();
+            let mut button = CreateButton::default();
+            button.label("Delete response");
+            button.custom_id("delete");
+            button.style(ButtonStyle::Danger);
+            ar.add_button(button);
+            components.add_action_row(ar);
+        }
+
+        components
     }
 
     pub async fn repost(&self, ctx: &Context, message: Option<Message>) {
