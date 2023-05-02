@@ -5,7 +5,7 @@ use crate::scheduler::{ResponseType, Scheduler};
 use chrono::Weekday;
 use clap::Parser;
 use dotenv::dotenv;
-use lockfree::map::Map;
+use lockfree::map::{Map, ReadGuard};
 use log::{error, info};
 use serenity::async_trait;
 use serenity::client::{Context, EventHandler};
@@ -13,10 +13,9 @@ use serenity::json::Value;
 use serenity::model::application::command::{Command, CommandOptionType};
 use serenity::model::application::interaction::{
     application_command::ApplicationCommandInteraction,
-    message_component::MessageComponentInteraction,
-    Interaction,
-    InteractionResponseType
+    message_component::MessageComponentInteraction, Interaction, InteractionResponseType,
 };
+use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::model::id::{ChannelId, GuildId, MessageId, RoleId};
 use serenity::prelude::*;
@@ -34,6 +33,7 @@ const MAX_DATES: usize = 25; // limit for select menu
 struct Handler {
     refresh: bool,
     schedulers: Map<MessageId, Scheduler>,
+    reposts: Map<MessageId, MessageId>,
     startup_done: tokio::sync::OnceCell<()>,
 }
 
@@ -45,6 +45,21 @@ async fn send_error(ctx: &Context, command: &ApplicationCommandInteraction, msg:
         })
         .await
         .expect("Cannot send error response");
+}
+
+async fn create_response(ctx: &Context, command: &ApplicationCommandInteraction) -> Message {
+    command
+        .create_interaction_response(&ctx.http, |response| {
+            response
+                .kind(InteractionResponseType::ChannelMessageWithSource)
+                .interaction_response_data(|m| m.content("Please wait..."))
+        })
+        .await
+        .expect("Cannot respond to slash command");
+    command
+        .get_interaction_response(&ctx)
+        .await
+        .expect("Cannot get message")
 }
 
 fn read_file(path: &Path) -> Option<(u64, Scheduler)> {
@@ -94,11 +109,16 @@ impl Handler {
         }
 
         let schedulers: Map<MessageId, Scheduler> = Map::new();
+        let reposts: Map<MessageId, MessageId> = Map::new();
         let mut count = 0;
         for f in std::fs::read_dir(DATA_DIR).expect("Cannot read data dir") {
             let path = f.unwrap().path();
             if let Some((id, s)) = read_file(&path) {
-                schedulers.insert(id.into(), s);
+                let id = id.into();
+                if let Some(repost) = s.get_repost() {
+                    reposts.insert(repost, id);
+                }
+                schedulers.insert(id, s);
                 count += 1;
             }
         }
@@ -107,23 +127,43 @@ impl Handler {
         Handler {
             refresh,
             schedulers,
+            reposts,
             ..Default::default()
         }
     }
 
-    async fn create_scheduler(&self, ctx: Context, command: ApplicationCommandInteraction) {
-        let options: HashMap<&str, &Value> = command
-            .data
+    async fn handle_command(&self, ctx: Context, command: ApplicationCommandInteraction) {
+        let option = &command.data.options[0];
+        let name = option.name.as_str();
+        let options: HashMap<&str, &Value> = command.data.options[0]
             .options
             .iter()
             .filter_map(|o| o.value.as_ref().map(|v| (o.name.as_ref(), v)))
             .collect();
+        match name {
+            "create" => self.create_scheduler(ctx, &command, options).await,
+            "repost" => self.repost_scheduler(ctx, &command, options).await,
+            _ => panic!("Unexpected subcommand: {name}"),
+        };
+    }
+
+    fn get_scheduler(&self, id: MessageId) -> Option<ReadGuard<MessageId, Scheduler>> {
+        let id = self.reposts.get(&id).map(|g| *g.val()).unwrap_or(id);
+        return self.schedulers.get(&id);
+    }
+
+    async fn create_scheduler(
+        &self,
+        ctx: Context,
+        command: &ApplicationCommandInteraction,
+        options: HashMap<&str, &Value>,
+    ) {
         let title = options
             .get("description")
             .expect("Cannot find description option");
         let title = title.as_str().expect("Caption has incorrect type");
         if title.len() > 256 {
-            send_error(&ctx, &command, "Description is too long").await;
+            send_error(&ctx, command, "Description is too long").await;
             return;
         }
         let group = options.get("group").map(|v| {
@@ -147,23 +187,41 @@ impl Handler {
         let skip = options
             .get("skip")
             .map(|v| v.as_i64().expect("Skip has incorrect type"));
-        command
-            .create_interaction_response(&ctx.http, |response| {
-                response
-                    .kind(InteractionResponseType::ChannelMessageWithSource)
-                    .interaction_response_data(|m| m.content("Please wait..."))
-            })
-            .await
-            .expect("Cannot respond to slash command");
-        let message = command
-            .get_interaction_response(&ctx)
-            .await
-            .expect("Cannot get message");
+        let message = create_response(&ctx, command).await;
         let message_id = message.id;
         let scheduler = Scheduler::new(command.user.id, group, message, limit, skip, title, days);
-        scheduler.update_message(&ctx).await;
+        scheduler.update_messages(&ctx).await;
         write_file(&message_id, &scheduler);
         self.schedulers.insert(message_id, scheduler);
+    }
+
+    async fn repost_scheduler(
+        &self,
+        ctx: Context,
+        command: &ApplicationCommandInteraction,
+        options: HashMap<&str, &Value>,
+    ) {
+        let scheduler_guard = match options
+            .get("id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .ok()
+            .and_then(|id| self.get_scheduler(id.into()))
+        {
+            Some(s) => s,
+            None => {
+                send_error(&ctx, command, "Invalid message id").await;
+                return;
+            }
+        };
+        let scheduler = scheduler_guard.val();
+
+        let message = create_response(&ctx, command).await;
+        let repost_id = message.id;
+        scheduler.repost(&ctx, Some(message)).await;
+        self.reposts.insert(repost_id, scheduler.get_id());
     }
 
     async fn handle_get_response(
@@ -183,8 +241,7 @@ impl Handler {
                 .unwrap(),
         };
         let scheduler = self
-            .schedulers
-            .get(&message_id)
+            .get_scheduler(message_id)
             .expect("Cannot find scheduler");
         scheduler
             .val()
@@ -195,8 +252,7 @@ impl Handler {
     async fn handle_show_details(&self, ctx: Context, component: &MessageComponentInteraction) {
         let message_id = component.message.id;
         let scheduler = self
-            .schedulers
-            .get(&message_id)
+            .get_scheduler(message_id)
             .expect("Cannot find scheduler");
         scheduler.val().show_details(&ctx, component).await;
     }
@@ -206,43 +262,59 @@ impl Handler {
         Command::create_global_application_command(&ctx, |command| {
             command
                 .name("schedule")
-                .description("Create a scheduler")
+                .description("scheduler")
                 .create_option(|o| {
-                    o.name("description")
-                        .description("event description")
-                        .kind(CommandOptionType::String)
-                        .required(true)
+                    o.name("create")
+                        .kind(CommandOptionType::SubCommand)
+                        .description("Create a scheduler")
+                        .create_sub_option(|o| {
+                            o.name("description")
+                                .description("event description")
+                                .kind(CommandOptionType::String)
+                                .required(true)
+                        })
+                        .create_sub_option(|o| {
+                            o.name("group")
+                                .description("player group")
+                                .kind(CommandOptionType::Role)
+                        })
+                        .create_sub_option(|o| {
+                            o.name("limit")
+                                .description("number of dates to include")
+                                .kind(CommandOptionType::Integer)
+                                .min_int_value(1)
+                                .max_int_value(MAX_DATES)
+                        })
+                        .create_sub_option(|o| {
+                            o.name("skip")
+                                .description("weeks before start")
+                                .kind(CommandOptionType::Integer)
+                                .min_int_value(0)
+                        })
+                        .create_sub_option(|o| {
+                            o.name("days")
+                                .description("weekdays to include")
+                                .kind(CommandOptionType::String)
+                                .add_string_choice("Saturday + Sunday", "Sat+Sun")
+                                .add_string_choice("Sunday", "Sun")
+                                .add_string_choice("Monday", "Mon")
+                                .add_string_choice("Tuesday", "Tue")
+                                .add_string_choice("Wednesday", "Wed")
+                                .add_string_choice("Thursday", "Thu")
+                                .add_string_choice("Friday", "Fri")
+                                .add_string_choice("Saturday", "Sat")
+                        })
                 })
                 .create_option(|o| {
-                    o.name("group")
-                        .description("player group")
-                        .kind(CommandOptionType::Role)
-                })
-                .create_option(|o| {
-                    o.name("limit")
-                        .description("number of dates to include")
-                        .kind(CommandOptionType::Integer)
-                        .min_int_value(1)
-                        .max_int_value(MAX_DATES)
-                })
-                .create_option(|o| {
-                    o.name("skip")
-                        .description("weeks before start")
-                        .kind(CommandOptionType::Integer)
-                        .min_int_value(0)
-                })
-                .create_option(|o| {
-                    o.name("days")
-                        .description("weekdays to include")
-                        .kind(CommandOptionType::String)
-                        .add_string_choice("Saturday + Sunday", "Sat+Sun")
-                        .add_string_choice("Sunday", "Sun")
-                        .add_string_choice("Monday", "Mon")
-                        .add_string_choice("Tuesday", "Tue")
-                        .add_string_choice("Wednesday", "Wed")
-                        .add_string_choice("Thursday", "Thu")
-                        .add_string_choice("Friday", "Fri")
-                        .add_string_choice("Saturday", "Sat")
+                    o.name("repost")
+                        .kind(CommandOptionType::SubCommand)
+                        .description("Repost a scheduler message")
+                        .create_sub_option(|o| {
+                            o.name("id")
+                                .description("message id")
+                                .kind(CommandOptionType::String)
+                                .required(true)
+                        })
                 })
         })
         .await
@@ -251,7 +323,7 @@ impl Handler {
         if self.refresh {
             for entry in self.schedulers.iter() {
                 let scheduler = entry.val();
-                scheduler.update_message(ctx).await;
+                scheduler.update_messages(ctx).await;
             }
         }
     }
@@ -266,7 +338,7 @@ impl EventHandler for Handler {
                 let command_name = command.data.name.as_str();
                 info!("{} <{}>", command_name, user);
                 match command_name {
-                    "schedule" => self.create_scheduler(ctx, command).await,
+                    "schedule" => self.handle_command(ctx, command).await,
                     _ => panic!("Unexpected command: {}", command_name),
                 }
             }
@@ -300,14 +372,24 @@ impl EventHandler for Handler {
 
     async fn message_delete(
         &self,
-        _ctx: Context,
+        ctx: Context,
         _channel_id: ChannelId,
         deleted_message_id: MessageId,
         _guild_id: Option<GuildId>,
     ) {
-        if let Some(_scheduler) = self.schedulers.remove(&deleted_message_id) {
+        if let Some(scheduler) = self.schedulers.remove(&deleted_message_id) {
             info!("scheduler message deleted: {}", deleted_message_id);
             delete_file(&deleted_message_id);
+            if let Some(repost_id) = scheduler.val().get_repost() {
+                self.reposts.remove(&repost_id).unwrap();
+                scheduler.val().delete_repost(&ctx).await;
+            }
+        } else if let Some(id) = self.reposts.remove(&deleted_message_id) {
+            info!("scheduler repost deleted: {}", deleted_message_id);
+            let scheduler = self
+                .get_scheduler(*id.val())
+                .expect("Cannot find scheduler");
+            scheduler.val().repost(&ctx, None).await;
         }
     }
 }

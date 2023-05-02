@@ -11,7 +11,7 @@ use serenity::model::application::component::ButtonStyle;
 use serenity::model::application::interaction::message_component::MessageComponentInteraction;
 use serenity::model::application::interaction::InteractionResponseType;
 use serenity::model::channel::Message;
-use serenity::model::id::{RoleId, UserId};
+use serenity::model::id::{MessageId, RoleId, UserId};
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::Instant;
@@ -46,6 +46,8 @@ pub struct Scheduler {
     blackout_dates: RwLock<HashSet<NaiveDate>>,
     group: Option<RoleId>,
     message: MessageShim,
+    #[serde(default)]
+    repost_message: RwLock<Option<MessageShim>>,
     responses: RwLock<HashMap<UserId, Response>>,
     closed: bool,
 }
@@ -77,9 +79,18 @@ impl Scheduler {
             blackout_dates: Default::default(),
             group,
             message: message.into(),
+            repost_message: None.into(),
             responses: Default::default(),
             closed: false,
         }
+    }
+
+    pub fn get_id(&self) -> MessageId {
+        self.message.message_id
+    }
+
+    pub fn get_repost(&self) -> Option<MessageId> {
+        self.repost_message.read().unwrap().map(|m| m.message_id)
     }
 
     fn save(&self) {
@@ -89,13 +100,13 @@ impl Scheduler {
     pub async fn add_response(&self, ctx: &Context, user: UserId, response: Response) {
         self.responses.write().unwrap().insert(user, response);
         self.save();
-        self.update_message(ctx).await;
+        self.update_messages(ctx).await;
     }
 
     pub async fn set_blackout(&self, ctx: &Context, response: Response) {
         *self.blackout_dates.write().unwrap() = response.dates;
         self.save();
-        self.update_message(ctx).await;
+        self.update_messages(ctx).await;
     }
 
     fn get_responses(&self) -> String {
@@ -167,7 +178,15 @@ impl Scheduler {
             .into_iter()
     }
 
-    pub async fn update_message(&self, ctx: &Context) {
+    pub async fn update_messages(&self, ctx: &Context) {
+        self.update_message(ctx, &self.message).await;
+        let repost = *self.repost_message.read().unwrap();
+        if let Some(message) = repost {
+            self.update_message(ctx, &message).await;
+        }
+    }
+
+    async fn update_message(&self, ctx: &Context, message: &MessageShim) {
         let title = &self.title;
         let responses = self.get_responses();
         let results = self.get_results(false).join("\n");
@@ -176,7 +195,7 @@ impl Scheduler {
             Some(role) => format!("<@&{}>", role),
             None => "".to_owned(),
         };
-        self.message
+        message
             .edit(ctx, |m| {
                 let mut ar = CreateActionRow::default();
                 let mut text = "";
@@ -431,5 +450,30 @@ impl Scheduler {
         ar.add_button(button);
 
         components.add_action_row(ar)
+    }
+
+    pub async fn repost(&self, ctx: &Context, message: Option<Message>) {
+        if message.is_some() {
+            self.delete_repost(ctx).await;
+        }
+
+        {
+            let mut repost = self.repost_message.write().unwrap();
+            *repost = message.as_ref().map(|m| m.into());
+        }
+        self.save();
+        if message.is_some() {
+            self.update_messages(ctx).await;
+        }
+    }
+
+    pub async fn delete_repost(&self, ctx: &Context) {
+        let mut repost = *self.repost_message.write().unwrap();
+        if let Some(message) = repost.take() {
+            info!("deleting repost: {}", message.message_id);
+            if let Err(e) = message.delete(ctx).await {
+                error!("can't delete repost message: {e}");
+            }
+        }
     }
 }

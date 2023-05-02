@@ -6,8 +6,9 @@ use serenity::json::Value;
 use serenity::model::channel::Message;
 use serenity::model::id::{ChannelId, MessageId};
 
-/// Lightweight version of [`serenity::model::channel::Message`] that only supports [`edit`](MessageShim::edit)
-#[derive(Serialize, Deserialize)]
+/// Lightweight version of [`serenity::model::channel::Message`] that only supports
+/// [`edit`](MessageShim::edit) and [`delete`](MessageShim::delete)
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub struct MessageShim {
     pub message_id: MessageId,
     channel_id: ChannelId,
@@ -32,6 +33,13 @@ impl MessageShim {
         )
         .await?;
         Ok(())
+    }
+
+    /// See [`serenity::model::channel::Message::delete`]
+    pub async fn delete(&self, cache_http: impl CacheHttp) -> serenity::Result<()> {
+        self.channel_id
+            .delete_message(&cache_http.http(), self.message_id)
+            .await
     }
 }
 
